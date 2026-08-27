@@ -48,13 +48,18 @@ const COL = {
   FIRST_SEEN: 11,    // K  初回記録日時
   LAST_UPDATE: 12,   // L  最終更新日時
   POINTS_UPDATE: 13, // M  ポイント最終更新  ← Node が書き込む
+  ABOUT: 14,         // N  配信概要（about を HTML 除去したもの）
 };
 
 const HEADER_ROW = [
   'streamUuid', '配信者名', 'username', '配信タイトル',
   '配信開始時間', '開始曜日', '開始時', '総ポイント数',
   '最終視聴者数', 'ステータス', '初回記録日時', '最終更新日時', 'ポイント最終更新',
+  '配信概要',
 ];
+
+// N 列（配信概要）に入れる本文の最大文字数
+const ABOUT_MAX_CHARS = 2000;
 
 const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
 
@@ -97,7 +102,8 @@ function ensureSheet_() {
   let sh = ss.getSheetByName(WITHNY.SHEET_NAME);
   if (!sh) sh = ss.insertSheet(WITHNY.SHEET_NAME);
   const first = sh.getRange(1, 1, 1, HEADER_ROW.length).getValues()[0];
-  if (first.join('') === '' || first[0] !== 'streamUuid') {
+  // 見出しが未設定、または末尾（配信概要など新しい列）が欠けていたら書き直す
+  if (first[0] !== 'streamUuid' || first[HEADER_ROW.length - 1] !== HEADER_ROW[HEADER_ROW.length - 1]) {
     sh.getRange(1, 1, 1, HEADER_ROW.length).setValues([HEADER_ROW]);
     sh.setFrozenRows(1);
   }
@@ -167,6 +173,7 @@ function collectWithnyStreams() {
       const name = user.name || '';
       const username = user.username || '';
       const title = s.title || '';
+      const about = htmlToText_(s.about);
       const started = s.startedAt ? new Date(s.startedAt) : null;
       const viewers = (typeof s.viewerCount === 'number') ? s.viewerCount : '';
 
@@ -189,6 +196,7 @@ function collectWithnyStreams() {
         v[COL.STATUS - 1] = '配信中';
         v[COL.FIRST_SEEN - 1] = nowStr;
         v[COL.LAST_UPDATE - 1] = nowStr;
+        v[COL.ABOUT - 1] = about;
         toAppend.push(v);
       }
     });
@@ -225,4 +233,28 @@ function weekdayJa_(d) {
   const p = Utilities.formatDate(d, WITHNY.TZ, 'yyyy/MM/dd').split('/');
   const dow = new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]))).getUTCDay(); // 0=日
   return WEEKDAY_JA[dow];
+}
+
+// 配信概要 (about) は HTML。タグを除去して読めるテキストにする。
+function htmlToText_(html) {
+  if (!html) return '';
+  let s = String(html);
+  s = s.replace(/<\s*br\s*\/?>/gi, '\n');
+  s = s.replace(/<\s*\/(p|div|h[1-6]|li|tr)\s*>/gi, '\n');
+  s = s.replace(/<[^>]+>/g, '');            // 残りのタグを除去
+  s = s.replace(/&nbsp;/gi, ' ')
+       .replace(/&amp;/gi, '&')
+       .replace(/&lt;/gi, '<')
+       .replace(/&gt;/gi, '>')
+       .replace(/&quot;/gi, '"')
+       .replace(/&#0*39;/g, "'")
+       .replace(/&#x0*27;/gi, "'")
+       .replace(/&#(\d+);/g, function (_, n) { return String.fromCharCode(parseInt(n, 10)); });
+  s = s.replace(/\r/g, '')
+       .replace(/[ \t]+/g, ' ')
+       .replace(/ *\n */g, '\n')
+       .replace(/\n{3,}/g, '\n\n')
+       .replace(/^\s+|\s+$/g, '');
+  if (s.length > ABOUT_MAX_CHARS) s = s.slice(0, ABOUT_MAX_CHARS) + '…';
+  return s;
 }
