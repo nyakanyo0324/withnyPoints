@@ -2,9 +2,12 @@ name: withny points snapshot
 
 on:
   schedule:
-    # 10 分ごと（UTC / GitHub の負荷で数分ずれることがある）
-    - cron: "*/10 * * * *"
+    # 10 分ごと。分境界(0,10,20…)は混雑で間引かれやすいので 3 分ずらす。
+    # GitHub の負荷で数分〜数十分ずれる／スキップされることがある（仕様）。
+    - cron: "3,13,23,33,43,53 * * * *"
   workflow_dispatch: {} # Actions タブから手動実行できるように
+  repository_dispatch: # 外部 cron から叩く保険（GitHub のスケジューラが不発のとき用）
+    types: [run-snapshot]
 
 permissions:
   contents: read
