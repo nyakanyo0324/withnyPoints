@@ -1,0 +1,36 @@
+name: withny points snapshot
+
+on:
+  schedule:
+    # 10 分ごと（UTC / GitHub の負荷で数分ずれることがある）
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {} # Actions タブから手動実行できるように
+
+permissions:
+  contents: read
+
+concurrency:
+  group: withny-points
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run snapshot
+        run: node points-snapshot.js
+        env:
+          WITHNY_SESSION_TOKEN: ${{ secrets.WITHNY_SESSION_TOKEN }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SHEET_NAME: data2

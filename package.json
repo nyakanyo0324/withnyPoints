@@ -1,0 +1,18 @@
+{
+  "name": "withny-points-snapshot",
+  "version": "2.0.0",
+  "private": true,
+  "description": "withny の配信ごとの総ポイント数(leaderBoardUpdate)を socket.io で取得し Google スプレッドシート data2 に書き込む。GitHub Actions で 10 分ごとに実行する短命バッチ。",
+  "main": "points-snapshot.js",
+  "scripts": {
+    "snapshot": "node points-snapshot.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "google-auth-library": "^9.15.0",
+    "socket.io-client": "^4.8.1"
+  }
+}

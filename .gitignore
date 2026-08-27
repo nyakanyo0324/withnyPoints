@@ -1,0 +1,21 @@
+# 依存
+node_modules/
+
+# 資格情報（絶対にコミットしない）
+.env
+.env.*
+!.env.example
+service-account.json
+# サービスアカウント鍵など、JSON は package(-lock).json 以外すべて無視
+*.json
+!package.json
+!package-lock.json
+
+# ログ・作業ファイル
+*.log
+
+# スクリーンショット・画像
+*.png
+*.jpg
+*.jpeg
+*.gif
