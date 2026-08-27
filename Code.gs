@@ -50,13 +50,14 @@ const COL = {
   POINTS_UPDATE: 13, // M  ポイント最終更新  ← Node が書き込む
   ABOUT: 14,         // N  配信概要（about を HTML 除去したもの）
   TAGS: 15,          // O  タグ（カンマ区切り）
+  FAV_COUNT: 16,     // P  お気に入り登録者数（行作成時点。/api/casts?username= から）
 };
 
 const HEADER_ROW = [
   'streamUuid', '配信者名', 'username', '配信タイトル',
   '配信開始時間', '開始曜日', '開始時', '総ポイント数',
   '最終視聴者数', 'ステータス', '初回記録日時', '最終更新日時', 'ポイント最終更新',
-  '配信概要', 'タグ',
+  '配信概要', 'タグ', 'お気に入り登録者数',
 ];
 
 // N 列（配信概要）に入れる本文の最大文字数
@@ -164,6 +165,7 @@ function collectWithnyStreams() {
 
     const liveUuids = {};
     const toAppend = [];
+    const favCache = {}; // username -> お気に入り登録者数（同一実行内で使い回す）
 
     streams.forEach(function (s) {
       if (!s || !s.uuid) return;
@@ -200,6 +202,7 @@ function collectWithnyStreams() {
         v[COL.LAST_UPDATE - 1] = nowStr;
         v[COL.ABOUT - 1] = about;
         v[COL.TAGS - 1] = tags;
+        v[COL.FAV_COUNT - 1] = username ? favoriteCount_(username, favCache) : '';
         toAppend.push(v);
       }
     });
@@ -260,6 +263,32 @@ function htmlToText_(html) {
        .replace(/^\s+|\s+$/g, '');
   if (s.length > ABOUT_MAX_CHARS) s = s.slice(0, ABOUT_MAX_CHARS) + '…';
   return s;
+}
+
+// お気に入り登録者数。/api/casts?username= から casts[0].countFavorites を取る。
+// 失敗しても行作成は止めない（'' を返す）。cache は username -> 値。
+function favoriteCount_(username, cache) {
+  if (cache && Object.prototype.hasOwnProperty.call(cache, username)) return cache[username];
+  let out = '';
+  try {
+    const res = UrlFetchApp.fetch(
+      'https://www.withny.fun/api/casts?username=' + encodeURIComponent(username),
+      {
+        method: 'get',
+        muteHttpExceptions: true,
+        headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 (compatible; withny-logger/1.0)' },
+      }
+    );
+    if (res.getResponseCode() === 200) {
+      const j = JSON.parse(res.getContentText());
+      const c = j && j.casts && j.casts[0];
+      if (c && typeof c.countFavorites === 'number') out = c.countFavorites;
+    }
+  } catch (e) {
+    console.warn('favoriteCount_ 失敗 (' + username + '): ' + e);
+  }
+  if (cache) cache[username] = out;
+  return out;
 }
 
 // tags は [{id, name}, ...]。name をカンマ区切りにする。
