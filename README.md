@@ -155,10 +155,10 @@ F12 → **ストレージ** タブ → Cookie → `https://www.withny.fun`。
 
 - **総ポイント数は「10 分ごとに観測できた最新の累計値」**。`ステータス=終了` の行は
   「配信終了直前の観測値」で、真の最終値と数分〜十数分ぶんずれることがある。
-- `leaderBoardUpdate` が**接続直後に現在値を送ってくる**前提で作っている。もし withny が
-  「変化があったときだけ送る」仕様だと、静かな配信では値が取れない実行が出る
-  （その回はスキップされ、次回以降に拾える）。
-- ポイント機能（チャレンジ等）が無い配信は `leaderBoardUpdate` が来ず、H 列は空のまま。
+- socket は接続直後に現在の累計を送ってくることを実測で確認済み（多くの配信で数秒以内に取得）。
+  ただしポイント機能（チャレンジ等）が無い配信は `leaderBoardUpdate` が来ず、
+  `失敗内訳: {"timeout(no-leaderBoardUpdate)":N}` としてスキップされる（H 列は空のまま。想定どおり）。
+- socket に渡す UUID は配信 UUID ではなく **`ivsChannel.uuid`**（配信一覧の各要素の `ivsChannel.uuid`）。
 - GitHub Actions の cron は**混雑時に数分ずれる**ことがある。また**リポジトリに 60 日間
   コミットが無いと自動で無効化**される（何かコミットすれば復活）。
 - 配信一覧は `https://www.withny.fun/api/streams/with-rooms` が返す「現在ライブ中の全枠」。
@@ -167,9 +167,10 @@ F12 → **ストレージ** タブ → Cookie → `https://www.withny.fun`。
   確認ポイント:
   - REST: `GET https://www.withny.fun/api/streams/with-rooms`（配列で `uuid` `title` `startedAt` `cast.user.name` `viewerCount` があるか）
   - 認証: `GET https://www.withny.fun/api/auth/session` に Cookie を付けて `accessToken` が返るか
-  - socket: `wss://api.withny.fun/socket.io/?uuid=<streamUuid>&token=<accessToken>&passCode=undefined&EIO=4&transport=websocket`
+  - socket: `wss://api.withny.fun/socket.io/?uuid=<ivsChannelUuid>&token=<accessToken>&passCode=undefined&EIO=4&transport=websocket`
     に接続し `40/channels,` を送った後 `42/channels,["leaderBoardUpdate",{...}]` が来るか
-- `.env` と `service-account.json` は資格情報。共有・コミットしないこと（`.gitignore` 済み）。
+    （`44/channels,{"message":"ivsChannel does not exist..."}` が返るなら UUID の種類が違う）
+- `.env` と サービスアカウント鍵 JSON は資格情報。共有・コミットしないこと（`.gitignore` 済み）。
 
 ### もっと正確に取りたくなったら
 

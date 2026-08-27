@@ -27,7 +27,7 @@
 'use strict';
 
 require('dotenv').config();
-const { io } = require('socket.io-client');
+const WebSocket = require('ws');
 const { JWT } = require('google-auth-library');
 
 /* ----------------------------------------------------------------- 設定 */
@@ -44,10 +44,11 @@ const CFG = {
 
 const REST_STREAMS = 'https://www.withny.fun/api/streams/with-rooms';
 const REST_SESSION = 'https://www.withny.fun/api/auth/session';
-const SOCKET_URL = 'wss://api.withny.fun/channels'; // host: api.withny.fun / namespace: /channels
-const SOCKET_PATH = '/socket.io/';
+const SOCKET_BASE = 'wss://api.withny.fun/socket.io/'; // Engine.IO v4 / namespace: /channels
 const ORIGIN = 'https://www.withny.fun';
-const UA = 'Mozilla/5.0 (compatible; withny-points-snapshot/1.0)';
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 const COL = { TOTAL_POINTS: 'H', POINTS_UPDATE: 'M' }; // Code.gs の列と一致させる
 
 /* ----------------------------------------------------------------- メイン */
@@ -67,16 +68,23 @@ async function main() {
   const failed = results.filter((r) => !r || r.totalPoint == null);
   log('ポイント取得: ' + points.length + ' 件 / 取得できず: ' + failed.length + ' 件');
 
-  // 全滅かつ理由が connect_error 中心なら、トークン失効の可能性が高い
-  if (points.length === 0 && failed.length > 0) {
-    const ce = failed.filter((r) => r && String(r.note || '').startsWith('connect_error')).length;
-    if (ce >= failed.length * 0.8) {
-      throw new Error('全配信で接続に失敗しました。WITHNY_SESSION_TOKEN の失効、または withny 側の仕様変更を疑ってください。');
+  // 失敗理由の内訳を出す（原因調査用）
+  if (failed.length > 0) {
+    const notes = {};
+    for (const r of failed) {
+      const n = (r && r.note) || 'unknown';
+      notes[n] = (notes[n] || 0) + 1;
     }
+    log('失敗内訳: ' + JSON.stringify(notes, null, 0));
   }
 
   if (points.length) await writeToSheet(points);
   log('完了 (' + ((Date.now() - t0) / 1000).toFixed(1) + 's)');
+
+  // 1件も取れなかったら run を失敗扱いにする（原因は上の「失敗内訳」を参照）
+  if (points.length === 0 && failed.length > 0) {
+    throw new Error('全配信でポイントを取得できませんでした。上の「失敗内訳」を確認してください。');
+  }
 }
 
 /* ----------------------------------------------------------------- withny 認証 */
@@ -135,7 +143,8 @@ async function getLiveStreams(accessToken) {
   return list
     .filter((s) => s && s.uuid)
     .map((s) => ({
-      uuid: String(s.uuid),
+      uuid: String(s.uuid),                                   // data2 の突合キー（streamUuid）
+      ivsChannelUuid: (s.ivsChannel && s.ivsChannel.uuid) || null, // socket が要求する UUID
       title: (s.title || '').slice(0, 40),
       name: (s.cast && s.cast.user && s.cast.user.name) || '',
       passCode: s.passCode || 'undefined', // withny 仕様: 未設定は文字列 "undefined"
@@ -144,40 +153,81 @@ async function getLiveStreams(accessToken) {
 
 /* ----------------------------------------------------------------- 1 配信スナップショット */
 
+// withny-dl（実績あり）と同じ生フレーム手順で socket.io に接続する:
+//   1. wss://api.withny.fun/socket.io/?uuid=..&token=..&passCode=..&EIO=4&transport=websocket
+//   2. サーバから "0{...}"（Engine.IO open）→ クライアントから "40/channels," を送る
+//   3. サーバから "40/channels,{...}"（ネームスペース接続OK）
+//   4. サーバから "42/channels,[\"leaderBoardUpdate\",{...}]" を待つ
+//   ・"2"(ping) が来たら "3"(pong) を返す
 function snapshotStream(stream, accessToken) {
   return new Promise((resolve) => {
-    let done = false;
-    const query = { uuid: stream.uuid, token: accessToken, passCode: stream.passCode };
+    if (!stream.ivsChannelUuid) {
+      resolve({ uuid: stream.uuid, totalPoint: null, note: 'no-ivsChannel' });
+      return;
+    }
+    const qs = new URLSearchParams({
+      uuid: stream.ivsChannelUuid, // サーバが要求するのは ivsChannel の UUID（配信 UUID ではない）
+      token: accessToken,
+      passCode: stream.passCode || 'undefined',
+      EIO: '4',
+      transport: 'websocket',
+    });
+    const url = SOCKET_BASE + '?' + qs.toString();
 
-    const socket = io(SOCKET_URL, {
-      path: SOCKET_PATH,
-      transports: ['websocket'], // polling は withny 側で無効
-      query: query,
-      auth: query,
-      extraHeaders: { Origin: ORIGIN },
-      reconnection: false,
-      timeout: Math.min(CFG.perStreamTimeoutMs, 15000),
+    let done = false;
+    let nsConnected = false;
+
+    const ws = new WebSocket(url, {
+      headers: { Origin: ORIGIN, 'User-Agent': UA },
+      handshakeTimeout: 15000,
     });
 
     const finish = (totalPoint, note) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      try { socket.removeAllListeners(); socket.close(); } catch (e) { /* noop */ }
+      try { ws.removeAllListeners(); ws.terminate(); } catch (e) { /* noop */ }
       resolve({ uuid: stream.uuid, totalPoint, note });
     };
 
-    const timer = setTimeout(() => finish(null, 'timeout'), CFG.perStreamTimeoutMs);
+    const timer = setTimeout(
+      () => finish(null, nsConnected ? 'timeout(no-leaderBoardUpdate)' : 'timeout(no-namespace)'),
+      CFG.perStreamTimeoutMs
+    );
 
-    // 接続直後にサーバーが現在の累計を送ってくる想定。最初の 1 通を採用する。
-    socket.on('leaderBoardUpdate', (payload) => {
-      const lb = payload && payload.leaderBoard;
-      const tp = lb ? Number(lb.totalPoint) : NaN;
-      if (Number.isFinite(tp)) finish(tp, 'ok');
+    ws.on('message', (raw) => {
+      const msg = raw.toString();
+      const head = msg[0];
+
+      if (head === '0') {
+        ws.send('40/channels,'); // ネームスペース接続要求（withny-dl と同じく本体なし）
+      } else if (head === '2') {
+        ws.send('3'); // ping -> pong
+      } else if (msg.startsWith('40/channels')) {
+        nsConnected = true;
+      } else if (msg.startsWith('44/channels') || msg.startsWith('41/channels')) {
+        finish(null, 'ns-rejected: ' + msg.slice(0, 160));
+      } else if (msg.startsWith('42/channels,')) {
+        try {
+          const arr = JSON.parse(msg.slice('42/channels,'.length));
+          if (Array.isArray(arr) && arr[0] === 'leaderBoardUpdate') {
+            const lb = arr[1] && arr[1].leaderBoard;
+            const tp = lb ? Number(lb.totalPoint) : NaN;
+            if (Number.isFinite(tp)) finish(tp, 'ok');
+          }
+        } catch (e) { /* JSON でないイベントは無視 */ }
+      }
     });
 
-    socket.on('connect_error', (err) => {
-      finish(null, 'connect_error: ' + ((err && err.message) || String(err)).slice(0, 120));
+    ws.on('unexpected-response', (_req, res) => {
+      finish(null, 'http-' + res.statusCode);
+    });
+    ws.on('error', (err) => {
+      finish(null, 'ws-error: ' + ((err && err.message) || String(err)).slice(0, 160));
+    });
+    ws.on('close', (code, reason) => {
+      finish(null, 'closed-' + code + (nsConnected ? '-after-ns' : '') +
+        (reason && reason.length ? ' ' + reason.toString().slice(0, 80) : ''));
     });
   });
 }
@@ -204,7 +254,10 @@ async function runPool(items, concurrency, worker) {
 async function writeToSheet(points) {
   let sa;
   try { sa = JSON.parse(CFG.saJson); }
-  catch (e) { throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON が正しい JSON ではありません'); }
+  catch (e) { throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON が正しい JSON ではありません（鍵ファイルの中身を丸ごと貼る）'); }
+  if (!sa.client_email || !sa.private_key) {
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON に client_email / private_key がありません（サービスアカウント鍵 JSON か確認）');
+  }
 
   const jwt = new JWT({
     email: sa.client_email,
