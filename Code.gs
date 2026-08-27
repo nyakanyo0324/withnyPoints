@@ -49,13 +49,14 @@ const COL = {
   LAST_UPDATE: 12,   // L  最終更新日時
   POINTS_UPDATE: 13, // M  ポイント最終更新  ← Node が書き込む
   ABOUT: 14,         // N  配信概要（about を HTML 除去したもの）
+  TAGS: 15,          // O  タグ（カンマ区切り）
 };
 
 const HEADER_ROW = [
   'streamUuid', '配信者名', 'username', '配信タイトル',
   '配信開始時間', '開始曜日', '開始時', '総ポイント数',
   '最終視聴者数', 'ステータス', '初回記録日時', '最終更新日時', 'ポイント最終更新',
-  '配信概要',
+  '配信概要', 'タグ',
 ];
 
 // N 列（配信概要）に入れる本文の最大文字数
@@ -174,6 +175,7 @@ function collectWithnyStreams() {
       const username = user.username || '';
       const title = s.title || '';
       const about = htmlToText_(s.about);
+      const tags = tagsToText_(s.tags);
       const started = s.startedAt ? new Date(s.startedAt) : null;
       const viewers = (typeof s.viewerCount === 'number') ? s.viewerCount : '';
 
@@ -197,6 +199,7 @@ function collectWithnyStreams() {
         v[COL.FIRST_SEEN - 1] = nowStr;
         v[COL.LAST_UPDATE - 1] = nowStr;
         v[COL.ABOUT - 1] = about;
+        v[COL.TAGS - 1] = tags;
         toAppend.push(v);
       }
     });
@@ -257,4 +260,13 @@ function htmlToText_(html) {
        .replace(/^\s+|\s+$/g, '');
   if (s.length > ABOUT_MAX_CHARS) s = s.slice(0, ABOUT_MAX_CHARS) + '…';
   return s;
+}
+
+// tags は [{id, name}, ...]。name をカンマ区切りにする。
+function tagsToText_(tags) {
+  if (!Array.isArray(tags)) return '';
+  return tags
+    .map(function (t) { return (t && t.name != null) ? String(t.name) : ''; })
+    .filter(function (x) { return x !== ''; })
+    .join(', ');
 }
