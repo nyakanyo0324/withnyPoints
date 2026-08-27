@@ -43,7 +43,7 @@ const COL = {
   WEEKDAY: 6,        // F  開始曜日 (日〜土)
   HOUR: 7,           // G  開始時 (0〜23)
   TOTAL_POINTS: 8,   // H  総ポイント数  ← Node が書き込む。GAS は触らない
-  VIEWERS: 9,        // I  最終視聴者数
+  MAX_VIEWERS: 9,    // I  最大視聴者数（観測した最大値。下回ったら更新しない）
   STATUS: 10,        // J  ステータス (配信中 / 終了)
   FIRST_SEEN: 11,    // K  初回記録日時
   LAST_UPDATE: 12,   // L  最終更新日時
@@ -56,7 +56,7 @@ const COL = {
 const HEADER_ROW = [
   'streamUuid', '配信者名', 'username', '配信タイトル',
   '配信開始時間', '開始曜日', '開始時', '総ポイント数',
-  '最終視聴者数', 'ステータス', '初回記録日時', '最終更新日時', 'ポイント最終更新',
+  '最大視聴者数', 'ステータス', '初回記録日時', '最終更新日時', 'ポイント最終更新',
   '配信概要', 'タグ', 'お気に入り登録者数',
 ];
 
@@ -104,8 +104,10 @@ function ensureSheet_() {
   let sh = ss.getSheetByName(WITHNY.SHEET_NAME);
   if (!sh) sh = ss.insertSheet(WITHNY.SHEET_NAME);
   const first = sh.getRange(1, 1, 1, HEADER_ROW.length).getValues()[0];
-  // 見出しが未設定、または末尾（配信概要など新しい列）が欠けていたら書き直す
-  if (first[0] !== 'streamUuid' || first[HEADER_ROW.length - 1] !== HEADER_ROW[HEADER_ROW.length - 1]) {
+  // 未設定、または見出しが1つでも一致しなければ書き直す（列の追加・改名に追従）
+  const isOurs = first[0] === 'streamUuid';
+  const matches = HEADER_ROW.every(function (h, i) { return first[i] === h; });
+  if (first.join('') === '' || (isOurs && !matches)) {
     sh.getRange(1, 1, 1, HEADER_ROW.length).setValues([HEADER_ROW]);
     sh.setFrozenRows(1);
   }
@@ -184,7 +186,11 @@ function collectWithnyStreams() {
       const row = rowByUuid[uuid];
       if (row) {
         // 既存配信: ポイント列 (H) には触れず、可変項目だけ更新
-        sh.getRange(row, COL.VIEWERS).setValue(viewers);
+        // 最大視聴者数は「今回の方が多いときだけ」上書き（下回ったら記録しない）
+        if (typeof viewers === 'number') {
+          const prevMax = Number(values[row - 2][COL.MAX_VIEWERS - 1]) || 0;
+          if (viewers > prevMax) sh.getRange(row, COL.MAX_VIEWERS).setValue(viewers);
+        }
         sh.getRange(row, COL.STATUS).setValue('配信中');
         sh.getRange(row, COL.LAST_UPDATE).setValue(nowStr);
       } else {
@@ -196,7 +202,7 @@ function collectWithnyStreams() {
         v[COL.STARTED_AT - 1] = started ? fmt_(started) : '';
         v[COL.WEEKDAY - 1] = started ? weekdayJa_(started) : '';
         v[COL.HOUR - 1] = started ? Number(Utilities.formatDate(started, WITHNY.TZ, 'H')) : '';
-        v[COL.VIEWERS - 1] = viewers;
+        v[COL.MAX_VIEWERS - 1] = viewers;
         v[COL.STATUS - 1] = '配信中';
         v[COL.FIRST_SEEN - 1] = nowStr;
         v[COL.LAST_UPDATE - 1] = nowStr;
