@@ -13,17 +13,22 @@
  *   ・同一配信 (streamUuid) は行を増やさず、可変項目だけ更新（＝総ポイント数を更新するに留める）
  *   ・一覧から消えた配信は「終了」ステータスに変更
  *
+ *   ・実行の最後に GitHub Actions の points-snapshot を起動する
+ *     （repository_dispatch。GH_TOKEN が設定されている場合のみ）
+ *
  * この GAS がやらないこと:
- *   ・「総ポイント数」列 (H) の書き込み。
+ *   ・「総ポイント数」列 (H)・「ポイント最終更新」列 (M) の書き込み。
  *     その数値（配信プレイヤー上部の "◯◯ pt"）は withny の
  *     認証付き socket.io WebSocket でしか配信されておらず、
  *     GAS の UrlFetchApp では取得できない。
- *     → 併設の Node.js 常駐スクリプト points-collector.js が H 列を埋める。
- *       GAS は H 列に一切触れない。
+ *     → GitHub Actions の points-snapshot.js が H・M 列を埋める。
  *
  * 初回セットアップ:
  *   1. スプレッドシートを開き直す（メニュー「withny ロガー」が出る）
  *   2. メニュー →「セットアップ（トリガー作成）」を 1 回実行し、権限を承認する
+ *   3. GitHub の scheduled(cron) が不発なので、points-snapshot を GAS から起動する:
+ *      プロジェクトの設定 → スクリプト プロパティ に GH_TOKEN（Fine-grained PAT,
+ *      対象リポジトリのみ・Contents: Read and write）を追加する
  */
 
 const WITHNY = {
@@ -65,6 +70,15 @@ const ABOUT_MAX_CHARS = 2000;
 
 const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
 
+// 毎回の実行後に GitHub Actions の points-snapshot を起動する設定。
+// GitHub の scheduled(cron) が不発なので、この GAS トリガーから叩く。
+// PAT は Script Properties の GH_TOKEN に入れる（未設定なら起動をスキップ）。
+const GH = {
+  OWNER: 'nyakanyo0324',
+  REPO: 'withnyPoints',
+  EVENT_TYPE: 'run-snapshot', // withny-points.yml の repository_dispatch types と一致
+};
+
 /* ---------------------------------------------------------------- メニュー */
 
 function onOpen() {
@@ -72,6 +86,7 @@ function onOpen() {
     .createMenu('withny ロガー')
     .addItem('セットアップ（トリガー作成）', 'setupTrigger')
     .addItem('今すぐ 1 回実行', 'collectWithnyStreams')
+    .addItem('points-snapshot を起動（テスト）', 'triggerPointsSnapshotNow')
     .addItem('トリガー削除', 'removeTriggers')
     .addToUi();
 }
@@ -232,6 +247,52 @@ function collectWithnyStreams() {
   } finally {
     lock.releaseLock();
   }
+
+  // 行の更新が終わったら points-snapshot（H/M列）を起動
+  triggerPointsSnapshot_();
+}
+
+/* ---------------------------------------------------------------- points-snapshot 起動 */
+
+// GitHub Actions の points-snapshot を repository_dispatch で起動する。
+// 失敗しても collectWithnyStreams 本体は成功扱いのまま（警告ログのみ）。
+function triggerPointsSnapshot_() {
+  const token = PropertiesService.getScriptProperties().getProperty('GH_TOKEN');
+  if (!token) {
+    console.warn('GH_TOKEN 未設定のため points-snapshot を起動しませんでした '
+      + '（プロジェクトの設定 → スクリプト プロパティ で GH_TOKEN を追加）');
+    return;
+  }
+  try {
+    const res = UrlFetchApp.fetch(
+      'https://api.github.com/repos/' + GH.OWNER + '/' + GH.REPO + '/dispatches',
+      {
+        method: 'post',
+        contentType: 'application/json',
+        muteHttpExceptions: true,
+        headers: {
+          'Authorization': 'Bearer ' + token,
+          'Accept': 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+        payload: JSON.stringify({ event_type: GH.EVENT_TYPE }),
+      }
+    );
+    const code = res.getResponseCode();
+    if (code === 204) {
+      console.log('points-snapshot 起動リクエスト OK (204)');
+    } else {
+      console.warn('points-snapshot 起動リクエスト応答 ' + code + ': ' + res.getContentText().slice(0, 300));
+    }
+  } catch (e) {
+    console.warn('points-snapshot 起動に失敗: ' + e);
+  }
+}
+
+// メニュー「points-snapshot を起動（テスト）」用
+function triggerPointsSnapshotNow() {
+  triggerPointsSnapshot_();
+  SpreadsheetApp.getActive().toast('points-snapshot に起動リクエストを送信しました（GitHub の Actions タブで確認）');
 }
 
 /* ---------------------------------------------------------------- ユーティリティ */
