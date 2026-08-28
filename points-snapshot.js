@@ -27,8 +27,13 @@
 'use strict';
 
 require('dotenv').config();
+const fs = require('node:fs');
 const WebSocket = require('ws');
 const { JWT } = require('google-auth-library');
+
+// withny がセッション Cookie をローテーションしたら、この名前で新トークンを書き出す。
+// ワークフローがこれを読んで Secret WITHNY_SESSION_TOKEN を更新する。
+const ROTATED_TOKEN_FILE = '.rotated-session-token';
 
 /* ----------------------------------------------------------------- 設定 */
 
@@ -101,6 +106,34 @@ function buildCookieHeader(raw) {
   return '__Secure-next-auth.session-token=' + v;
 }
 
+// WITHNY_SESSION_TOKEN 入力から「トークンの値だけ」を取り出す（分割 .0 .1 は連結）。
+function sessionTokenValue(raw) {
+  const s = String(raw).trim();
+  const m = [...s.matchAll(/session-token(\.\d+)?=([^;]+)/gi)];
+  if (m.length === 0) return s; // 値だけが渡された
+  if (m.length === 1 && !m[0][1]) return m[0][2].trim();
+  return m.filter((p) => p[1])
+    .sort((a, b) => Number(a[1].slice(1)) - Number(b[1].slice(1)))
+    .map((p) => p[2].trim())
+    .join('');
+}
+
+// Set-Cookie 配列から新しい session-token の値を取り出す（分割 .0 .1 は連結）。
+function rotatedTokenFromSetCookie(setCookies) {
+  const found = {};
+  let plain = null;
+  for (const line of setCookies || []) {
+    const m = line.match(/(?:__Secure-|__Host-)?next-auth\.session-token(\.\d+)?=([^;]+)/i);
+    if (!m) continue;
+    if (m[1]) found[Number(m[1].slice(1))] = m[2];
+    else plain = m[2];
+  }
+  if (plain != null) return plain;
+  const idx = Object.keys(found).map(Number).sort((a, b) => a - b);
+  if (!idx.length) return null;
+  return idx.map((i) => found[i]).join('');
+}
+
 async function getWithnyAccessToken() {
   const res = await fetch(REST_SESSION, {
     headers: {
@@ -122,6 +155,22 @@ async function getWithnyAccessToken() {
       'ブラウザから __Secure-next-auth.session-token を取り直して Secret を更新してください。'
     );
   }
+
+  // 認証成功。セッション Cookie がローテーションされていたら新トークンをファイルに書き出す
+  // （ワークフローがこれを読んで Secret WITHNY_SESSION_TOKEN を更新する）。
+  try {
+    const setCookies = typeof res.headers.getSetCookie === 'function'
+      ? res.headers.getSetCookie()
+      : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')] : []);
+    const rotated = rotatedTokenFromSetCookie(setCookies);
+    if (rotated && rotated !== sessionTokenValue(CFG.sessionToken)) {
+      fs.writeFileSync(ROTATED_TOKEN_FILE, rotated, 'utf8');
+      log('session-token がローテーションされました → ' + ROTATED_TOKEN_FILE + ' に保存 (' + rotated.length + '文字)');
+    }
+  } catch (e) {
+    log('ローテーション保存の処理でエラー: ' + (e && e.message ? e.message : e));
+  }
+
   return json.accessToken;
 }
 

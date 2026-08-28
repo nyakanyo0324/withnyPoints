@@ -37,3 +37,22 @@ jobs:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SHEET_NAME: data2
+
+      # withny がセッション Cookie をローテーションしていたら、新トークンで
+      # Secret WITHNY_SESSION_TOKEN を上書きする（トークンの延命）。
+      # WITHNY_GH_PAT = Secrets: Read and write 権限の Fine-grained PAT。
+      - name: Persist rotated session token
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.WITHNY_GH_PAT }}
+        run: |
+          if [ ! -s .rotated-session-token ]; then
+            echo "今回はローテーションなし"
+            exit 0
+          fi
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::WITHNY_GH_PAT 未設定のため Secret を更新できません（トークンはいずれ失効します）"
+            exit 0
+          fi
+          gh secret set WITHNY_SESSION_TOKEN --repo "$GITHUB_REPOSITORY" --body "$(cat .rotated-session-token)"
+          echo "::notice::WITHNY_SESSION_TOKEN を更新しました"

@@ -13,6 +13,7 @@ service-account.json
 
 # ログ・作業ファイル
 *.log
+.rotated-session-token
 
 # スクリーンショット・画像
 *.png
