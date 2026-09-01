@@ -56,13 +56,14 @@ const COL = {
   ABOUT: 14,         // N  配信概要（about を HTML 除去したもの）
   TAGS: 15,          // O  タグ（カンマ区切り）
   FAV_COUNT: 16,     // P  お気に入り登録者数（行作成時点。/api/casts?username= から）
+  ENDED_AT: 17,      // Q  配信終了時間（＝一覧から消える直前に最後に配信中と確認した時刻）
 };
 
 const HEADER_ROW = [
   'streamUuid', '配信者名', 'username', '配信タイトル',
   '配信開始時間', '開始曜日', '開始時', '総ポイント数',
   '最大視聴者数', 'ステータス', '初回記録日時', '最終更新日時', 'ポイント最終更新',
-  '配信概要', 'タグ', 'お気に入り登録者数',
+  '配信概要', 'タグ', 'お気に入り登録者数', '配信終了時間',
 ];
 
 // N 列（配信概要）に入れる本文の最大文字数
@@ -239,6 +240,8 @@ function collectWithnyStreams() {
       if (!liveUuids[uuid] && r[COL.STATUS - 1] !== '終了') {
         const row = i + 2;
         sh.getRange(row, COL.STATUS).setValue('終了');
+        // 配信終了時間 = 前回までに最後に「配信中」と確認できた時刻（＝この実行前の L 値）
+        sh.getRange(row, COL.ENDED_AT).setValue(r[COL.LAST_UPDATE - 1] || nowStr);
         sh.getRange(row, COL.LAST_UPDATE).setValue(nowStr);
       }
     });
