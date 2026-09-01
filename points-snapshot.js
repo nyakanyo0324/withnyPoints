@@ -54,7 +54,10 @@ const ORIGIN = 'https://www.withny.fun';
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
-const COL = { TOTAL_POINTS: 'H', POINTS_UPDATE: 'M' }; // Code.gs の列と一致させる
+// Code.gs の列と一致させる。START_POINTS は「その配信を最初に観測した時のカウンタ値」を
+// 1 回だけ書き、withny の持ち越し仕様に対応する（実質ポイント = 総ポイント数 − 開始時ポイント）。
+const COL = { TOTAL_POINTS: 'H', POINTS_UPDATE: 'M', START_POINTS: 'R' };
+const COL_IDX = { UUID: 0, START_POINTS: 17 }; // A2:R の 0 始まりインデックス
 
 /* ----------------------------------------------------------------- メイン */
 
@@ -319,23 +322,35 @@ async function writeToSheet(points) {
   const base = 'https://sheets.googleapis.com/v4/spreadsheets/' + encodeURIComponent(CFG.spreadsheetId);
   const headers = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
 
-  // A 列（streamUuid）を読み出して uuid -> 行番号
-  const range = encodeURIComponent(CFG.sheetName + '!A2:A');
+  // A〜R を読み出して uuid -> {行番号, 開始時ポイント既設か}
+  const range = encodeURIComponent(CFG.sheetName + '!A2:R');
   const getRes = await fetch(base + '/values/' + range, { headers });
   if (!getRes.ok) throw new Error('Sheets get ' + getRes.status + ': ' + (await getRes.text()).slice(0, 300));
   const rows = (await getRes.json()).values || [];
   const rowByUuid = new Map();
-  rows.forEach((r, i) => { if (r[0]) rowByUuid.set(String(r[0]), i + 2); });
+  rows.forEach((r, i) => {
+    const uuid = r[COL_IDX.UUID];
+    if (!uuid) return;
+    const sp = r[COL_IDX.START_POINTS];
+    rowByUuid.set(String(uuid), { row: i + 2, hasStart: sp !== undefined && sp !== '' });
+  });
 
   const stamp = jstStamp(new Date());
   const data = [];
   let matched = 0;
   let pending = 0;
+  let baselines = 0;
   for (const p of points) {
-    const row = rowByUuid.get(p.uuid);
-    if (!row) { pending++; continue; } // GAS がまだ行を作っていない。累計値なので次回でOK
+    const hit = rowByUuid.get(p.uuid);
+    if (!hit) { pending++; continue; } // GAS がまだ行を作っていない。累計値なので次回でOK
+    const row = hit.row;
     data.push({ range: CFG.sheetName + '!' + COL.TOTAL_POINTS + row, values: [[p.totalPoint]] });
     data.push({ range: CFG.sheetName + '!' + COL.POINTS_UPDATE + row, values: [[stamp]] });
+    // 開始時ポイント（ベースライン）はこの配信で初めて観測したときだけ書く
+    if (!hit.hasStart) {
+      data.push({ range: CFG.sheetName + '!' + COL.START_POINTS + row, values: [[p.totalPoint]] });
+      baselines++;
+    }
     matched++;
   }
 
@@ -350,7 +365,7 @@ async function writeToSheet(points) {
     body: JSON.stringify({ valueInputOption: 'RAW', data }),
   });
   if (!upRes.ok) throw new Error('Sheets batchUpdate ' + upRes.status + ': ' + (await upRes.text()).slice(0, 300));
-  log('シート更新: ' + matched + ' 行（GAS 未作成でスキップ: ' + pending + ' 件）');
+  log('シート更新: ' + matched + ' 行（うち開始時ポイント初回記録: ' + baselines + ' 件 / GAS 未作成でスキップ: ' + pending + ' 件）');
 }
 
 /* ----------------------------------------------------------------- 小物 */
