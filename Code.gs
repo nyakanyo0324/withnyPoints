@@ -74,6 +74,10 @@ const ABOUT_MAX_CHARS = 2000;
 
 const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
 
+// 数式列。毎回、行2をテンプレにデータ最終行までコピーし、それより下は消す。
+// （数式セルは結果が "" でも getLastRow に数えられ、新規行が下にズレて書かれるのを防ぐ）
+const FORMULA_FILL = { START_COL: 19, NUM_COLS: 22 }; // S(19) 〜 AN(40)
+
 // 毎回の実行後に GitHub Actions の points-snapshot を起動する設定。
 // GitHub の scheduled(cron) が不発なので、この GAS トリガーから叩く。
 // PAT は Script Properties の GH_TOKEN に入れる（未設定なら起動をスキップ）。
@@ -232,8 +236,16 @@ function collectWithnyStreams() {
       }
     });
 
+    // 実データの最終行を A 列（streamUuid）から求める（S:AN の数式で getLastRow が
+    // 伸びていても、その下に append しないようにする）
+    let dataLast = 1;
+    for (let i = values.length - 1; i >= 0; i--) {
+      if (String(values[i][COL.UUID - 1] || '').trim() !== '') { dataLast = i + 2; break; }
+    }
+
     if (toAppend.length) {
-      sh.getRange(sh.getLastRow() + 1, 1, toAppend.length, width).setValues(toAppend);
+      sh.getRange(dataLast + 1, 1, toAppend.length, width).setValues(toAppend);
+      dataLast += toAppend.length;
     }
 
     // 一覧から消えた「配信中」行を「終了」に
@@ -249,7 +261,10 @@ function collectWithnyStreams() {
       }
     });
 
-    console.log('配信中=' + streams.length + ' / 新規行=' + toAppend.length);
+    // S〜AN の数式を行2テンプレでデータ最終行までコピーし、それより下は消す
+    refillFormulaColumns_(sh, dataLast);
+
+    console.log('配信中=' + streams.length + ' / 新規行=' + toAppend.length + ' / データ最終行=' + dataLast);
   } finally {
     lock.releaseLock();
   }
@@ -371,4 +386,25 @@ function tagsToText_(tags) {
     .map(function (t) { return (t && t.name != null) ? String(t.name) : ''; })
     .filter(function (x) { return x !== ''; })
     .join(', ');
+}
+
+// S〜AN の数式を、行2をテンプレートとして lastDataRow までコピーし、
+// それより下（最大行まで）は消す。lastDataRow はデータの実最終行。
+function refillFormulaColumns_(sh, lastDataRow) {
+  const c = FORMULA_FILL.START_COL;
+  const n = FORMULA_FILL.NUM_COLS;
+  const maxRow = sh.getMaxRows();
+
+  const tmpl = sh.getRange(2, c, 1, n).getFormulasR1C1()[0]; // 相対参照は行ごとに自動調整される
+  const hasTemplate = tmpl.some(function (f) { return f !== ''; });
+
+  if (hasTemplate && lastDataRow >= 3) {
+    const nRows = lastDataRow - 2;
+    const block = [];
+    for (let k = 0; k < nRows; k++) block.push(tmpl.slice());
+    sh.getRange(3, c, nRows, n).setFormulasR1C1(block); // 書式は保持、数式だけ差し替え
+  }
+  if (maxRow > lastDataRow) {
+    sh.getRange(lastDataRow + 1, c, maxRow - lastDataRow, n).clearContent();
+  }
 }
