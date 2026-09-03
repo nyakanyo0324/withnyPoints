@@ -59,6 +59,17 @@ const UA =
 const COL = { TOTAL_POINTS: 'H', POINTS_UPDATE: 'M', START_POINTS: 'R' };
 const COL_IDX = { UUID: 0, START_POINTS: 17 }; // A2:R の 0 始まりインデックス
 
+// 投げ銭ランキング上位を書き出すシート（持ち越し補正なしの生の point）。
+// 行: streamUuid / 配信者 / 1位名 / 1位pt / 2位名 / 2位pt / … / 10位名 / 10位pt（A〜V の 22 列）
+const RANKING_SHEET = process.env.RANKING_SHEET || 'sheet4';
+const RANKING_TOP_N = 10;
+const RANKING_HEADER = (() => {
+  const h = ['streamUuid', '配信者'];
+  for (let i = 1; i <= RANKING_TOP_N; i++) h.push(i + '位ユーザー名', i + '位ポイント');
+  return h;
+})();
+const RANKING_LAST_COL = 'V'; // A(1) + 2 + 2*10 - 1 = V(22)
+
 /* ----------------------------------------------------------------- メイン */
 
 async function main() {
@@ -87,6 +98,13 @@ async function main() {
   }
 
   if (points.length) await writeToSheet(points);
+
+  const withRanking = points.filter((r) => Array.isArray(r.ranking) && r.ranking.length);
+  if (withRanking.length) {
+    try { await writeRankingToSheet4(withRanking); }
+    catch (e) { log('ランキング書き込み失敗: ' + (e && e.message ? e.message : e)); }
+  }
+
   log('完了 (' + ((Date.now() - t0) / 1000).toFixed(1) + 's)');
 
   // 1件も取れなかったら run を失敗扱いにする（原因は上の「失敗内訳」を参照）
@@ -234,12 +252,12 @@ function snapshotStream(stream, accessToken) {
       handshakeTimeout: 15000,
     });
 
-    const finish = (totalPoint, note) => {
+    const finish = (totalPoint, note, ranking) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       try { ws.removeAllListeners(); ws.terminate(); } catch (e) { /* noop */ }
-      resolve({ uuid: stream.uuid, totalPoint, note });
+      resolve({ uuid: stream.uuid, name: stream.name, totalPoint, note, ranking: ranking || null });
     };
 
     const timer = setTimeout(
@@ -265,7 +283,9 @@ function snapshotStream(stream, accessToken) {
           if (Array.isArray(arr) && arr[0] === 'leaderBoardUpdate') {
             const lb = arr[1] && arr[1].leaderBoard;
             const tp = lb ? Number(lb.totalPoint) : NaN;
-            if (Number.isFinite(tp)) finish(tp, 'ok');
+            if (Number.isFinite(tp)) {
+              finish(tp, 'ok', Array.isArray(lb.ranking) ? lb.ranking : []);
+            }
           }
         } catch (e) { /* JSON でないイベントは無視 */ }
       }
@@ -366,6 +386,91 @@ async function writeToSheet(points) {
   });
   if (!upRes.ok) throw new Error('Sheets batchUpdate ' + upRes.status + ': ' + (await upRes.text()).slice(0, 300));
   log('シート更新: ' + matched + ' 行（うち開始時ポイント初回記録: ' + baselines + ' 件 / GAS 未作成でスキップ: ' + pending + ' 件）');
+}
+
+/* ----------------------------------------------------------------- 投げ銭ランキング（sheet4） */
+
+async function sheetsAuthContext() {
+  const sa = JSON.parse(CFG.saJson);
+  const jwt = new JWT({
+    email: sa.client_email,
+    key: sa.private_key,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+  });
+  const authRes = await jwt.authorize();
+  return {
+    base: 'https://sheets.googleapis.com/v4/spreadsheets/' + encodeURIComponent(CFG.spreadsheetId),
+    headers: { Authorization: 'Bearer ' + authRes.access_token, 'Content-Type': 'application/json' },
+  };
+}
+
+// results: [{ uuid, name, ranking: [{name|userName, point}, ...] }]
+// 1 配信 = 1 行。streamUuid で照合し、毎回上位 10 位で上書き（持ち越し補正なし）。
+async function writeRankingToSheet4(results) {
+  const { base, headers } = await sheetsAuthContext();
+  const enc = (r) => encodeURIComponent(r);
+
+  // sheet4 を読む（無ければ作る）
+  let rows = [];
+  const get = await fetch(base + '/values/' + enc(RANKING_SHEET + '!A1:' + RANKING_LAST_COL), { headers });
+  const body = await get.text();
+  if (get.status === 400 && /Unable to parse range/i.test(body)) {
+    await fetch(base + ':batchUpdate', {
+      method: 'POST', headers,
+      body: JSON.stringify({ requests: [{ addSheet: { properties: { title: RANKING_SHEET } } }] }),
+    });
+    log(RANKING_SHEET + ' シートを新規作成しました');
+  } else if (!get.ok) {
+    throw new Error(RANKING_SHEET + ' 読み取り失敗 ' + get.status + ': ' + body.slice(0, 200));
+  } else {
+    rows = (JSON.parse(body).values) || [];
+  }
+
+  // 見出し
+  const hasHeader = rows.length > 0 && String((rows[0] || [])[0]) === 'streamUuid';
+  if (!hasHeader) {
+    await fetch(base + '/values/' + enc(RANKING_SHEET + '!A1') + '?valueInputOption=RAW', {
+      method: 'PUT', headers, body: JSON.stringify({ values: [RANKING_HEADER] }),
+    });
+  }
+
+  // データ行（見出しを除く）の uuid -> 実シート行番号（見出しが1行目 → データは2行目起点）
+  const dataRows = hasHeader ? rows.slice(1) : [];
+  const rowByUuid = new Map();
+  dataRows.forEach((r, i) => { if (r[0]) rowByUuid.set(String(r[0]), i + 2); });
+
+  const updates = [];
+  const appends = [];
+  for (const res of results) {
+    const top = [...res.ranking]
+      .sort((a, b) => (Number(b && b.point) || 0) - (Number(a && a.point) || 0))
+      .slice(0, RANKING_TOP_N);
+    const row = [res.uuid, res.name || ''];
+    for (let i = 0; i < RANKING_TOP_N; i++) {
+      const e = top[i];
+      row.push(e ? (e.name || e.userName || 'guest') : '');
+      row.push(e ? (Number(e.point) || 0) : '');
+    }
+    const at = rowByUuid.get(res.uuid);
+    if (at) updates.push({ range: RANKING_SHEET + '!A' + at + ':' + RANKING_LAST_COL + at, values: [row] });
+    else appends.push(row);
+  }
+
+  if (updates.length) {
+    const up = await fetch(base + '/values:batchUpdate', {
+      method: 'POST', headers,
+      body: JSON.stringify({ valueInputOption: 'RAW', data: updates }),
+    });
+    if (!up.ok) throw new Error(RANKING_SHEET + ' 更新失敗 ' + up.status + ': ' + (await up.text()).slice(0, 200));
+  }
+  if (appends.length) {
+    const ap = await fetch(
+      base + '/values/' + enc(RANKING_SHEET) + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS',
+      { method: 'POST', headers, body: JSON.stringify({ values: appends }) }
+    );
+    if (!ap.ok) throw new Error(RANKING_SHEET + ' 追加失敗 ' + ap.status + ': ' + (await ap.text()).slice(0, 200));
+  }
+  log(RANKING_SHEET + ' 更新: ' + updates.length + ' 行 / 追加: ' + appends.length + ' 行');
 }
 
 /* ----------------------------------------------------------------- 小物 */
